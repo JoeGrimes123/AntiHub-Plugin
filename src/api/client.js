@@ -137,7 +137,7 @@ export async function getAvailableModels() {
     });
     
     data = await response.json();
-    
+
     if (!response.ok) {
       throw new Error(`获取模型列表失败 (${response.status}): ${JSON.stringify(data)}`);
     }
@@ -146,9 +146,10 @@ export async function getAvailableModels() {
     throw error;
   }
   
+  const models = data?.models || {};
   return {
     object: 'list',
-    data: Object.keys(data.models).map(id => ({
+    data: Object.keys(models).map(id => ({
       id,
       object: 'model',
       created: Math.floor(Date.now() / 1000),
