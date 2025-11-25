@@ -157,6 +157,9 @@ class MultiAccountClient {
   async generateResponse(requestBody, callback, user_id, model_name, user) {
     const account = await this.getAvailableAccount(user_id, model_name, user);
     
+    // 判断是否为 Gemini 模型（不输出 <think> 标记）
+    const isGeminiModel = model_name.startsWith('gemini-');
+    
     // 对话开始前实时获取quota，如果为0则重新选择cookie
     let quotaBefore = null;
     let retryCount = 0;
@@ -265,17 +268,23 @@ class MultiAccountClient {
           if (parts) {
             for (const part of parts) {
               if (part.thought === true) {
-                if (!thinkingStarted) {
-                  callback({ type: 'thinking', content: '<think>\n' });
-                  thinkingStarted = true;
+                if (isGeminiModel) {
+                  // Gemini 模型：将 thought 内容当作普通文本返回
+                  callback({ type: 'text', content: part.text || '' });
+                } else {
+                  // 其他模型：使用 <think> 标记包裹
+                  if (!thinkingStarted) {
+                    callback({ type: 'thinking', content: '<think>\n' });
+                    thinkingStarted = true;
+                  }
+                  callback({ type: 'thinking', content: part.text || '' });
                 }
-                callback({ type: 'thinking', content: part.text || '' });
               } else if (part.text !== undefined) {
                 // 过滤掉空的非thought文本
                 if (part.text.trim() === '') {
                   continue;
                 }
-                if (thinkingStarted) {
+                if (thinkingStarted && !isGeminiModel) {
                   callback({ type: 'thinking', content: '\n</think>\n' });
                   thinkingStarted = false;
                 }
@@ -307,7 +316,7 @@ class MultiAccountClient {
           }
           
           if (data.response?.candidates?.[0]?.finishReason) {
-            if (thinkingStarted) {
+            if (thinkingStarted && !isGeminiModel) {
               callback({ type: 'thinking', content: '\n</think>\n' });
               thinkingStarted = false;
             }
