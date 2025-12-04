@@ -526,6 +526,7 @@ class MultiAccountClient {
       }
       
       // 更新到数据库
+      logger.info(`[DEBUG]: modelsData: ${modelsData ? JSON.stringify(modelsData) : 'null'}`);
       if (Object.keys(modelsData).length > 0) {
         await quotaService.updateQuotasFromModels(cookie_id, modelsData);
       }
