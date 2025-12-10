@@ -55,11 +55,19 @@ function extractImagesFromContent(content) {
 
   return result;
 }
+
+function convertThinkToThoughtTags(text) {
+  if (!text || typeof text !== 'string') {
+    return text;
+  }
+  return text.replace(/<think>/g, '<THOUGHT>').replace(/<\/think>/g, '</THOUGHT>');
+}
+
 function handleUserMessage(extracted, antigravityMessages) {
   const parts = [];
   if (extracted.text) {
-    // 非思考模型：直接放入文本，不添加任何标记
-    parts.push({ text: extracted.text });
+    const processedText = convertThinkToThoughtTags(extracted.text);
+    parts.push({ text: processedText });
   }
   parts.push(...extracted.images);
 
