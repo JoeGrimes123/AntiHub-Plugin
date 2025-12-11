@@ -1,11 +1,13 @@
 import express from 'express';
 import kiroAccountService from '../services/kiro_account.service.js';
 import kiroService from '../services/kiro.service.js';
+import kiroAWSBuilderService from '../services/kiro_aws_builder.service.js';
 import kiroClient from '../api/kiro_client.js';
 import kiroConsumptionService from '../services/kiro_consumption.service.js';
 import userService from '../services/user.service.js';
 import logger from '../utils/logger.js';
 import config from '../config/config.js';
+import crypto from 'crypto';
 import { countStringTokens } from '../utils/token_counter.js';
 
 const router = express.Router();
@@ -80,6 +82,191 @@ router.post('/api/kiro/oauth/authorize', authenticateApiKey, async (req, res) =>
     });
   } catch (error) {
     logger.error('生成Kiro登录URL失败:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * 获取AWS Builder ID登录URL
+ * POST /api/kiro/aws-builder/authorize
+ * Body: { is_shared }
+ */
+router.post('/api/kiro/aws-builder/authorize', authenticateApiKey, async (req, res) => {
+  try {
+    const { is_shared = 0 } = req.body;
+
+    if (is_shared !== 0 && is_shared !== 1) {
+      return res.status(400).json({ error: 'is_shared必须是0或1' });
+    }
+
+    // 获取Bearer token
+    const bearerToken = req.headers.authorization.slice(7); // 去掉'Bearer '前缀
+
+    // 生成AWS Builder ID登录URL
+    const result = await kiroAWSBuilderService.generateBuilderIDLoginUrl(req.user.user_id, is_shared, bearerToken);
+
+    res.json({
+      success: true,
+      data: result
+    });
+  } catch (error) {
+    logger.error('生成AWS Builder ID登录URL失败:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * 轮询AWS Builder ID登录状态
+ * GET /api/kiro/aws-builder/status/:state
+ */
+router.get('/api/kiro/aws-builder/status/:state', async (req, res) => {
+  try {
+    const { state } = req.params;
+
+    if (!state) {
+      return res.status(400).json({ error: '缺少state参数' });
+    }
+
+    // 从Redis获取OAuth状态信息
+    const stateInfo = await kiroAWSBuilderService.getBuilderIDOAuthStateInfo(state);
+
+    if (!stateInfo) {
+      return res.status(404).json({
+        error: '无效或已过期的state参数',
+        status: 'expired'
+      });
+    }
+
+    // 检查是否已完成
+    if (stateInfo.callback_completed) {
+      return res.json({
+        success: true,
+        status: 'completed',
+        data: stateInfo.account_data || null,
+        message: '登录已完成'
+      });
+    }
+
+    // 检查是否有错误
+    if (stateInfo.error) {
+      return res.json({
+        success: false,
+        status: 'error',
+        error: stateInfo.error,
+        message: '登录失败'
+      });
+    }
+
+    // 还在等待中
+    res.json({
+      success: true,
+      status: 'pending',
+      message: '等待用户完成登录...'
+    });
+  } catch (error) {
+    logger.error('查询AWS Builder ID OAuth状态失败:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * AWS Builder ID手动回调处理
+ * POST /api/kiro/aws-builder/callback
+ * Body: { state }
+ */
+router.post('/api/kiro/aws-builder/callback', async (req, res) => {
+  try {
+    const { state } = req.body;
+
+    if (!state) {
+      return res.status(400).json({ error: '缺少state参数' });
+    }
+
+    // 从Redis获取OAuth状态信息
+    const stateInfo = await kiroAWSBuilderService.getBuilderIDOAuthStateInfo(state);
+    if (!stateInfo) {
+      return res.status(400).json({ error: '无效或已过期的state参数' });
+    }
+
+    // 获取用户信息
+    const userId = stateInfo.user_id;
+
+    // 轮询获取token
+    logger.info('轮询AWS Builder ID token...');
+    const tokenData = await kiroAWSBuilderService.pollForBuilderIDToken(state);
+
+    // 获取使用量信息（使用profileArn和machineid）
+    logger.info('获取Kiro使用量信息...');
+    let usageLimitsData = {};
+    try {
+      usageLimitsData = await kiroService.getUsageLimits(tokenData.access_token, tokenData.profile_arn, stateInfo.machineid);
+      logger.info('使用量信息获取成功:', usageLimitsData);
+    } catch (error) {
+      logger.warn('获取使用量信息失败:', error.message);
+    }
+
+    // 创建账号
+    const accountName = usageLimitsData.email || `Kiro AWS Builder ID账号`;
+    // 生成一个临时的userid如果获取失败 (AWS Builder ID通常以d-开头，这里用uuid作为后备)
+    const fallbackUserid = `d-${crypto.randomUUID().substring(0, 10)}`;
+    
+    const account = await kiroAccountService.createAccount({
+      user_id: userId,
+      account_name: accountName,
+      auth_method: 'IdC', // Use IdC for AWS Builder ID
+      refresh_token: tokenData.refresh_token,
+      access_token: tokenData.access_token,
+      expires_at: new Date(tokenData.expires_at).getTime(),
+      client_id: tokenData.client_id,
+      client_secret: tokenData.client_secret,
+      profile_arn: tokenData.profile_arn,
+      machineid: stateInfo.machineid,
+      is_shared: stateInfo.is_shared,
+      email: usageLimitsData.email,
+      userid: usageLimitsData.userid || fallbackUserid,
+      subscription: usageLimitsData.subscription || 'unknown',
+      current_usage: usageLimitsData.current_usage || 0,
+      reset_date: usageLimitsData.reset_date || new Date().toISOString(),
+      usage_limit: usageLimitsData.usage_limit || 0,
+      // 免费试用信息
+      free_trial_status: usageLimitsData.free_trial_status || null,
+      free_trial_usage: usageLimitsData.free_trial_usage || null,
+      free_trial_expiry: usageLimitsData.free_trial_expiry || null,
+      free_trial_limit: usageLimitsData.free_trial_limit || 0,
+      // bonus信息
+      bonus_usage: usageLimitsData.bonus_usage || 0,
+      bonus_limit: usageLimitsData.bonus_limit || 0,
+      bonus_available: usageLimitsData.bonus_available || 0,
+      bonus_details: usageLimitsData.bonus_details || []
+    });
+
+    // 准备安全的账号数据
+    const safeAccountData = {
+      account_id: account.account_id,
+      user_id: account.user_id,
+      account_name: account.account_name,
+      auth_method: account.auth_method,
+      status: account.status,
+      expires_at: account.expires_at,
+      email: account.email,
+      subscription: account.subscription,
+      created_at: account.created_at
+    };
+
+    // 更新Redis中的OAuth状态（标记为已完成）
+    await kiroAWSBuilderService.updateBuilderIDOAuthState(state, {
+      callback_completed: true,
+      completed_at: Date.now(),
+      account_data: safeAccountData
+    });
+
+    res.json({
+      success: true,
+      message: 'AWS Builder ID登录成功！',
+      data: safeAccountData
+    });
+  } catch (error) {
+    logger.error('AWS Builder ID登录失败:', error.message);
     res.status(500).json({ error: error.message });
   }
 });

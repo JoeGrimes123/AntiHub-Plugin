@@ -491,10 +491,77 @@ class KiroService {
       if (!account.clientId || !account.clientSecret) {
         throw new Error('IdC认证需要clientId和clientSecret');
       }
+      // For AWS Builder ID, use SSO OIDC refresh
+      if (account.auth_method === 'builder-id') {
+        return await this.refreshAWSBuilderToken(account.refreshToken, account.clientId, account.clientSecret);
+      }
       return await this.refreshIdCToken(account.refreshToken, account.clientId, account.clientSecret);
     } else {
       throw new Error(`未知的认证方式: ${account.auth}`);
     }
+  }
+
+  /**
+   * 刷新AWS Builder ID token（使用AWS SSO OIDC）
+   * @param {string} refreshToken - 刷新令牌
+   * @param {string} clientId - 客户端ID
+   * @param {string} clientSecret - 客户端密钥
+   * @returns {Promise<Object>} Token数据
+   */
+  async refreshAWSBuilderToken(refreshToken, clientId, clientSecret) {
+    const requestId = crypto.randomUUID().substring(0, 8);
+    logger.info(`[${requestId}] 开始刷新AWS Builder ID Token`);
+
+    return new Promise((resolve, reject) => {
+      const postData = JSON.stringify({
+        clientId,
+        clientSecret,
+        refreshToken,
+        grantType: 'refresh_token'
+      });
+
+      const options = {
+        hostname: 'oidc.us-east-1.amazonaws.com',
+        path: '/token',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(postData)
+        }
+      };
+
+      const req = https.request(options, (res) => {
+        let body = '';
+        res.on('data', chunk => body += chunk);
+        res.on('end', () => {
+          if (res.statusCode === 200) {
+            try {
+              const data = JSON.parse(body);
+              logger.info(`[${requestId}] AWS Builder ID Token刷新成功, expires_in=${data.expiresIn}`);
+              resolve({
+                access_token: data.accessToken,
+                expires_in: data.expiresIn,
+                profile_arn: data.profileArn
+              });
+            } catch (error) {
+              logger.error(`[${requestId}] JSON解析失败:`, error.message);
+              reject(new Error(`JSON解析失败: ${error.message}`));
+            }
+          } else {
+            logger.error(`[${requestId}] AWS Builder ID Token刷新失败: HTTP ${res.statusCode}`);
+            reject(new Error(`HTTP ${res.statusCode}: ${body}`));
+          }
+        });
+      });
+
+      req.on('error', (error) => {
+        logger.error(`[${requestId}] 请求异常:`, error.message);
+        reject(error);
+      });
+
+      req.write(postData);
+      req.end();
+    });
   }
 
   /**
@@ -1126,12 +1193,18 @@ class KiroService {
     const requestId = crypto.randomUUID().substring(0, 8);
     logger.info(`[${requestId}] 开始获取Kiro使用量信息`);
     return new Promise((resolve, reject) => {
-      const params = new URLSearchParams({
+      const paramsObj = {
         isEmailRequired: true,
         origin: 'AI_EDITOR',
-        profileArn: profileArn,
         resourceType: 'AGENTIC_REQUEST'
-      });
+      };
+      
+      // 只有当profileArn存在时才添加（Social登录需要，AWS Builder ID不需要）
+      if (profileArn) {
+        paramsObj.profileArn = profileArn;
+      }
+      
+      const params = new URLSearchParams(paramsObj);
 
       const invocationId = crypto.randomUUID();
       const kiroUserAgent = `KiroIDE-${KIRO_IDE_VERSION}-${machineid}`;
