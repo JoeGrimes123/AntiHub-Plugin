@@ -52,24 +52,51 @@ class Database {
       this.pool.end();
     }
 
-    this.pool = new Pool({
-      host: config.host || 'localhost',
-      port: config.port || 5432,
-      database: config.database,
-      user: config.user,
-      password: config.password,
+    const baseOptions = {
       max: config.max || 20,
       idleTimeoutMillis: config.idleTimeoutMillis || 30000,
       connectionTimeoutMillis: config.connectionTimeoutMillis || 2000,
       // 设置时区为UTC,确保时间格式一致
       options: '-c timezone=UTC',
-    });
+    };
+
+    // 支持 database.url / connectionString（例如 Neon 提供的 postgresql://...）
+    // 同时支持显式 ssl 配置（Neon 通常需要 SSL）
+    if (config.url) {
+      this.pool = new Pool({
+        ...baseOptions,
+        connectionString: config.url,
+        ...(config.ssl ? { ssl: config.ssl } : {})
+      });
+    } else {
+      this.pool = new Pool({
+        ...baseOptions,
+        host: config.host || 'localhost',
+        port: config.port || 5432,
+        database: config.database,
+        user: config.user,
+        password: config.password,
+        ...(config.ssl ? { ssl: config.ssl } : {})
+      });
+    }
 
     this.pool.on('error', (err) => {
       logger.error('数据库连接池错误:', err.message);
     });
 
-    logger.info(`数据库连接池已初始化: ${config.host}:${config.port}/${config.database}`);
+    // 避免在日志中输出包含凭据的 URL
+    if (config.url) {
+      let safe = 'postgresql://<configured>';
+      try {
+        const u = new URL(config.url);
+        safe = `${u.protocol}//${u.hostname}${u.port ? `:${u.port}` : ''}${u.pathname}`;
+      } catch {
+        // ignore
+      }
+      logger.info(`数据库连接池已初始化: ${safe}`);
+    } else {
+      logger.info(`数据库连接池已初始化: ${config.host}:${config.port}/${config.database}`);
+    }
   }
 
   /**

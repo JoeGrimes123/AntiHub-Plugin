@@ -23,10 +23,7 @@ class RedisService {
     const redisConfig = config.redis || {};
     
     try {
-      this.client = new Redis({
-        host: redisConfig.host || 'localhost',
-        port: redisConfig.port || 6379,
-        password: redisConfig.password || undefined,
+      const baseOptions = {
         db: redisConfig.db || 0,
         retryStrategy: (times) => {
           if (times > 3) {
@@ -35,7 +32,27 @@ class RedisService {
           }
           return Math.min(times * 200, 2000);
         }
-      });
+      };
+
+      if (redisConfig.url) {
+        const url = redisConfig.url;
+
+        // Upstash 通常提供 rediss:// URL（TLS）
+        // ioredis 支持 rediss://，但这里也允许显式传入 tls 配置
+        const tlsOptions = url.startsWith('rediss://') ? (redisConfig.tls || {}) : undefined;
+
+        this.client = new Redis(url, {
+          ...baseOptions,
+          ...(tlsOptions ? { tls: tlsOptions } : {})
+        });
+      } else {
+        this.client = new Redis({
+          host: redisConfig.host || 'localhost',
+          port: redisConfig.port || 6379,
+          password: redisConfig.password || undefined,
+          ...baseOptions
+        });
+      }
 
       this.client.on('connect', () => {
         this.connected = true;
